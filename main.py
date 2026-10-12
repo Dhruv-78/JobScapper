@@ -16,12 +16,20 @@ groq_client = openai.OpenAI(
 ) if GROQ_API_KEY else None
 
 USER_PROFILE = """
-Fourth-year B.Tech student in Biotechnology at IIT Delhi looking for entry-level Software Engineering,
-Data Science, Quantitative Development, or Machine Learning roles/internships.
-Skills: Python, C++, SQL, Java, Go, PyTorch, TensorFlow, Scikit-Learn, Pandas, NumPy, REST APIs, System Design.
-Experience: Software Development Intern at Flipkart (data compression, AI developer tooling),
+Fourth-year B.Tech student in Biotechnology at IIT Delhi looking for remote Software Engineering (SDE),
+Data Science, Machine Learning, or Quantitative Development roles and internships.
+Technical Skills: Python, C++, SQL, Java, Go, PyTorch, TensorFlow, Scikit-Learn, Pandas, NumPy, REST APIs, System Design.
+Experience: Software Development Intern at Flipkart (data compression optimization, AI developer tooling),
 NSS Secretary, top 25 at FITT Tech Future Hackathon 2024.
 """
+
+SEARCH_KEYWORDS = [
+    "Software Engineer",
+    "Data Scientist",
+    "Quantitative Developer",
+    "Machine Learning Engineer",
+    "Data Engineer"
+]
 
 def get_active_groq_model():
     """Dynamically retrieves an active text model from Groq API."""
@@ -54,16 +62,16 @@ def fetch_job_description(job_url, headers):
             soup = BeautifulSoup(res.text, "html.parser")
             desc_div = soup.find("div", class_="show-more-less-html__markup")
             if desc_div:
-                return desc_div.text.strip()[:2000] # Cap text for context efficiency
+                return desc_div.text.strip()[:2500]
     except Exception as e:
         print(f"[SCRAPER WARNING] Could not fetch description for {job_url}: {e}")
     return "Description unretrievable."
 
-def scrape_fresher_remote_jobs(keyword="Software Engineer", limit=5):
+def scrape_linkedin_remote_jobs(keyword, limit_per_keyword=3):
     """
-    Fetches guest LinkedIn jobs filtered specifically for Remote + Entry Level/Internships.
+    Fetches guest LinkedIn jobs filtered for Remote + Internships / Entry / Associate level.
     f_WT=2 -> Remote
-    f_E=1,2 -> Internship (1), Entry Level (2)
+    f_E=1,2,3 -> Internship (1), Entry Level (2), Associate (3)
     """
     base_url = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
     jobs = []
@@ -74,22 +82,21 @@ def scrape_fresher_remote_jobs(keyword="Software Engineer", limit=5):
     params = {
         "keywords": keyword,
         "location": "Remote",
-        "f_WT": "2",      # Remote only
-        "f_E": "1,2",     # Internship & Entry level only
+        "f_WT": "2",        # Remote only
+        "f_E": "1,2,3",     # Internship, Entry Level, Associate
         "start": 0
     }
 
     try:
         response = requests.get(base_url, headers=headers, params=params, timeout=10)
-        print(f"[SCRAPER] LinkedIn HTTP Status: {response.status_code}")
+        print(f"[SCRAPER] Query: '{keyword}' | HTTP Status: {response.status_code}")
         if response.status_code != 200:
             return []
 
         soup = BeautifulSoup(response.text, "html.parser")
         cards = soup.find_all("li")
-        print(f"[SCRAPER] Total raw job cards found: {len(cards)}")
 
-        for card in cards[:limit]:
+        for card in cards[:limit_per_keyword]:
             title_tag = card.find("h3", class_="base-search-card__title")
             company_tag = card.find("h4", class_="base-search-card__subtitle")
             link_tag = card.find("a", class_="base-card__full-link")
@@ -101,6 +108,7 @@ def scrape_fresher_remote_jobs(keyword="Software Engineer", limit=5):
                 jobs.append({
                     "title": title_tag.text.strip(),
                     "company": company_tag.text.strip() if company_tag else "N/A",
+                    "search_category": keyword,
                     "url": job_url,
                     "description": description
                 })
@@ -111,7 +119,7 @@ def scrape_fresher_remote_jobs(keyword="Software Engineer", limit=5):
     return jobs
 
 def evaluate_job(user_profile, job):
-    """Evaluates role fit, expected stipend/salary, and confirms fresher eligibility."""
+    """Evaluates role fit, expected stipend/salary, job type, and experience requirements."""
     if not groq_client:
         print("[LLM ERROR] GROQ_API_KEY missing!")
         return None
@@ -129,17 +137,19 @@ def evaluate_job(user_profile, job):
 
     Respond ONLY with a valid JSON object matching this schema:
     {{
-        "is_fresher_friendly": true/false,
-        "is_remote": true/false,
-        "expected_stipend_or_salary": "e.g., $30/hr, ₹30,000/mo, or Not specified in description",
+        "job_type": "Internship / Full-Time / Contract",
+        "suitable_for_fresher_or_grad": true/false,
+        "is_high_paying": true/false,
+        "expected_stipend_or_salary": "e.g., $40/hr, ₹60,000/mo, $120k/yr, or Not specified",
         "fit_score": 85,
         "verdict": "Apply / Consider / Skip",
-        "customization_tip": "Highlight experience with microservices and PyTorch."
+        "customization_tip": "Highlight experience with PyTorch, C++, and microservices."
     }}
 
-    CRITICAL RULES:
-    1. Set "is_fresher_friendly" to false if the description explicitly requires 2+ years of prior full-time industry experience.
-    2. Extract any salary, stipend, or compensation numbers mentioned in the description. If none exist, output "Not specified in description".
+    CRITICAL EVALUATION RULES:
+    1. Set "suitable_for_fresher_or_grad" to false ONLY if the position explicitly requires 3+ years of post-graduation industry experience.
+    2. Extract any stipend, hourly rate, or annual compensation numbers from the text. If none exist, output "Not specified in description".
+    3. Set "is_high_paying" to true if the position offers competitive pay (e.g., >$30/hr, >₹50k/mo stipend, or >$80k/yr full-time).
     """
 
     target_model = get_active_groq_model()
@@ -151,7 +161,7 @@ def evaluate_job(user_profile, job):
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2
         )
-        print(f"[LLM SUCCESS] Evaluated using model: {target_model}")
+        print(f"[LLM SUCCESS] Evaluated '{job['title']}' using {target_model}")
         return json.loads(res.choices[0].message.content)
     except Exception as e:
         print(f"[LLM ERROR] Evaluation failed on {target_model}: {e}")
@@ -160,7 +170,7 @@ def evaluate_job(user_profile, job):
 def send_telegram_notification(text):
     """Sends matched job alerts directly to your Telegram chat."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("[TELEGRAM NOTICE] Secrets missing. Outputting message locally:")
+        print("[TELEGRAM NOTICE] Secrets missing. Local output:")
         print(text)
         return
 
@@ -173,32 +183,49 @@ def send_telegram_notification(text):
         print(f"[TELEGRAM ERROR] {e}")
 
 def main():
-    print("=== STARTING FRESHER REMOTE JOB PIPELINE ===")
-    send_telegram_notification("🤖 *Job Scraper Executed:* Scanning for Remote Fresher / Internship roles...")
+    print("=== STARTING SDE & DATA SCIENCE REMOTE JOB PIPELINE ===")
+    send_telegram_notification("🤖 *Job Scraper Triggered:* Scanning SDE, Data Science, & Quant Remote Roles...")
 
-    jobs = scrape_fresher_remote_jobs(keyword="Software Engineer", limit=5)
-    print(f"[PIPELINE] Scraped {len(jobs)} valid job listings.")
+    all_jobs = []
+    seen_urls = set()
+
+    # Iterate through each career domain
+    for kw in SEARCH_KEYWORDS:
+        scraped = scrape_linkedin_remote_jobs(keyword=kw, limit_per_keyword=3)
+        for j in scraped:
+            if j["url"] not in seen_urls:
+                seen_urls.add(j["url"])
+                all_jobs.append(j)
+        time.sleep(1) # Gentle rate-limiting
+
+    print(f"[PIPELINE] Scraped {len(all_jobs)} unique listings across SDE & Data Science domains.")
 
     matches_found = 0
-    for job in jobs:
+    for job in all_jobs:
         eval_result = evaluate_job(USER_PROFILE, job)
         if not eval_result:
             continue
 
-        is_fresher = eval_result.get("is_fresher_friendly", True)
+        is_suitable = eval_result.get("suitable_for_fresher_or_grad", True)
         score = eval_result.get("fit_score", 0)
         stipend = eval_result.get("expected_stipend_or_salary", "Not specified")
+        job_type = eval_result.get("job_type", "Remote Role")
+        is_high_pay = eval_result.get("is_high_paying", False)
 
-        print(f"Job: {job['title']} | Fresher Friendly: {is_fresher} | Score: {score}% | Stipend: {stipend}")
+        print(f"[{job['search_category']}] {job['title']} | Score: {score}% | Type: {job_type} | Pay: {stipend}")
 
-        # Send alert if job is suitable for freshers and scores >= 70%
-        if is_fresher and score >= 70:
+        # Dispatch alert if job matches profile (>70%) and fits experience requirements
+        if is_suitable and score >= 70:
             matches_found += 1
+            high_pay_badge = "🔥 *[High Paying]*\n" if is_high_pay else ""
             msg = (
-                f"🎯 *New Remote Fresher Opportunity ({score}% Match)*\n"
+                f"🎯 *New Remote Match ({score}% Match)*\n"
+                f"{high_pay_badge}"
                 f"*Role:* {job['title']}\n"
                 f"*Company:* {job['company']}\n"
-                f"*Expected Stipend/Salary:* {stipend}\n"
+                f"*Category:* {job['search_category']}\n"
+                f"*Type:* {job_type}\n"
+                f"*Expected Pay/Stipend:* {stipend}\n"
                 f"*Work Mode:* 🏠 Remote\n"
                 f"*Tip:* {eval_result.get('customization_tip')}\n\n"
                 f"[Apply Here]({job['url']})"
@@ -207,9 +234,9 @@ def main():
             time.sleep(1)
 
     if matches_found == 0:
-        send_telegram_notification("ℹ️ Scan completed. No remote fresher postings found above 70% match in this run.")
+        send_telegram_notification("ℹ️ Scan complete. No suitable high-match SDE/DS listings found in this cycle.")
 
-    print(f"=== PIPELINE FINISHED. Sent {matches_found} job alerts ===")
+    print(f"=== PIPELINE FINISHED. Sent {matches_found} alerts ===")
 
 if __name__ == "__main__":
     main()
