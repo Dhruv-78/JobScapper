@@ -5,6 +5,7 @@ import requests
 from bs4 import BeautifulSoup
 import openai
 
+# API Secrets
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
@@ -15,19 +16,69 @@ groq_client = openai.OpenAI(
 ) if GROQ_API_KEY else None
 
 USER_PROFILE = """
-Software engineer with experience in Python, C++, REST APIs, system design,
-SQL, and machine learning (PyTorch, Pandas). Strong background in backend data engineering
-and microservices. Looking for Data Engineering or Backend Developer roles.
+Fourth-year B.Tech student in Biotechnology at IIT Delhi looking for entry-level Software Engineering,
+Data Science, Quantitative Development, or Machine Learning roles/internships.
+Skills: Python, C++, SQL, Java, Go, PyTorch, TensorFlow, Scikit-Learn, Pandas, NumPy, REST APIs, System Design.
+Experience: Software Development Intern at Flipkart (data compression, AI developer tooling),
+NSS Secretary, top 25 at FITT Tech Future Hackathon 2024.
 """
 
-def scrape_linkedin_jobs(keyword, location="Remote", limit=5):
+def get_active_groq_model():
+    """Dynamically retrieves an active text model from Groq API."""
+    try:
+        models = groq_client.models.list()
+        active_ids = [m.id for m in models.data]
+        
+        preferred = [
+            "llama-3.3-70b-versatile",
+            "openai/gpt-oss-20b",
+            "llama-3.1-8b-instant"
+        ]
+        for pref in preferred:
+            if pref in active_ids:
+                return pref
+        
+        text_models = [m_id for m_id in active_ids if "whisper" not in m_id and "guard" not in m_id]
+        if text_models:
+            return text_models[0]
+    except Exception as e:
+        print(f"[LLM WARNING] Dynamic model lookup failed: {e}")
+    
+    return "llama-3.3-70b-versatile"
+
+def fetch_job_description(job_url, headers):
+    """Fetches full job description text from LinkedIn guest page."""
+    try:
+        res = requests.get(job_url, headers=headers, timeout=8)
+        if res.status_code == 200:
+            soup = BeautifulSoup(res.text, "html.parser")
+            desc_div = soup.find("div", class_="show-more-less-html__markup")
+            if desc_div:
+                return desc_div.text.strip()[:2000] # Cap text for context efficiency
+    except Exception as e:
+        print(f"[SCRAPER WARNING] Could not fetch description for {job_url}: {e}")
+    return "Description unretrievable."
+
+def scrape_fresher_remote_jobs(keyword="Software Engineer", limit=5):
+    """
+    Fetches guest LinkedIn jobs filtered specifically for Remote + Entry Level/Internships.
+    f_WT=2 -> Remote
+    f_E=1,2 -> Internship (1), Entry Level (2)
+    """
     base_url = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
     jobs = []
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
 
-    params = {"keywords": keyword, "location": location, "start": 0}
+    params = {
+        "keywords": keyword,
+        "location": "Remote",
+        "f_WT": "2",      # Remote only
+        "f_E": "1,2",     # Internship & Entry level only
+        "start": 0
+    }
+
     try:
         response = requests.get(base_url, headers=headers, params=params, timeout=10)
         print(f"[SCRAPER] LinkedIn HTTP Status: {response.status_code}")
@@ -44,10 +95,14 @@ def scrape_linkedin_jobs(keyword, location="Remote", limit=5):
             link_tag = card.find("a", class_="base-card__full-link")
 
             if title_tag and link_tag:
+                job_url = link_tag["href"]
+                description = fetch_job_description(job_url, headers)
+
                 jobs.append({
                     "title": title_tag.text.strip(),
                     "company": company_tag.text.strip() if company_tag else "N/A",
-                    "url": link_tag["href"]
+                    "url": job_url,
+                    "description": description
                 })
 
     except Exception as e:
@@ -55,38 +110,10 @@ def scrape_linkedin_jobs(keyword, location="Remote", limit=5):
 
     return jobs
 
-def get_active_groq_model():
-    """Fetches currently available text models dynamically from Groq."""
-    try:
-        models = groq_client.models.list()
-        active_ids = [m.id for m in models.data]
-        
-        # Preference order of active models
-        preferred = [
-            "llama-3.3-70b-versatile",
-            "openai/gpt-oss-20b",
-            "llama-3.1-8b-instant"
-        ]
-        
-        for pref in preferred:
-            if pref in active_ids:
-                return pref
-        
-        # Fallback to the first available non-whisper/non-guard model
-        text_models = [m_id for m_id in active_ids if "whisper" not in m_id and "guard" not in m_id]
-        if text_models:
-            return text_models[0]
-            
-    except Exception as e:
-        print(f"[LLM WARNING] Could not fetch dynamic models: {e}")
-    
-    # Static safe fallback
-    return "llama-3.3-70b-versatile"
-
 def evaluate_job(user_profile, job):
-    """Evaluates role fit using an active Groq model."""
+    """Evaluates role fit, expected stipend/salary, and confirms fresher eligibility."""
     if not groq_client:
-        print("[LLM ERROR] GROQ_API_KEY missing! Set GROQ_API_KEY in GitHub Secrets.")
+        print("[LLM ERROR] GROQ_API_KEY missing!")
         return None
 
     prompt = f"""
@@ -95,13 +122,24 @@ def evaluate_job(user_profile, job):
 
     JOB TITLE: {job['title']}
     COMPANY: {job['company']}
+    DESCRIPTION: {job['description']}
 
-    Evaluate role fit. Respond ONLY with valid JSON matching this schema:
+    TASK:
+    Analyze this job posting carefully.
+
+    Respond ONLY with a valid JSON object matching this schema:
     {{
+        "is_fresher_friendly": true/false,
+        "is_remote": true/false,
+        "expected_stipend_or_salary": "e.g., $30/hr, ₹30,000/mo, or Not specified in description",
         "fit_score": 85,
-        "verdict": "Apply",
-        "customization_tip": "Highlight microservices and Python background."
+        "verdict": "Apply / Consider / Skip",
+        "customization_tip": "Highlight experience with microservices and PyTorch."
     }}
+
+    CRITICAL RULES:
+    1. Set "is_fresher_friendly" to false if the description explicitly requires 2+ years of prior full-time industry experience.
+    2. Extract any salary, stipend, or compensation numbers mentioned in the description. If none exist, output "Not specified in description".
     """
 
     target_model = get_active_groq_model()
@@ -118,116 +156,28 @@ def evaluate_job(user_profile, job):
     except Exception as e:
         print(f"[LLM ERROR] Evaluation failed on {target_model}: {e}")
         return None
-    """Evaluates role fit using Groq's free tier models with automatic fallback."""
-    if not groq_client:
-        print("[LLM ERROR] GROQ_API_KEY missing! Set GROQ_API_KEY in GitHub Secrets.")
-        return None
-
-    prompt = f"""
-    CANDIDATE PROFILE:
-    {user_profile}
-
-    JOB TITLE: {job['title']}
-    COMPANY: {job['company']}
-
-    Evaluate role fit. Respond ONLY with valid JSON:
-    {{
-        "fit_score": 85,
-        "verdict": "Apply",
-        "customization_tip": "Highlight backend microservice and Python experience."
-    }}
-    """
-
-    # List of candidate model IDs on Groq (runs in order of preference)
-    candidate_models = [
-        "llama-3.1-8b-instant",
-        "llama3-8b-8192",
-        "llama-3.3-70b-versatile",
-        "mixtral-8x7b-32768"
-    ]
-
-    for model_name in candidate_models:
-        try:
-            res = groq_client.chat.completions.create(
-                model=model_name,
-                response_format={"type": "json_object"},
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.2
-            )
-            # Log which model successfully handled the request
-            print(f"[LLM SUCCESS] Evaluated using {model_name}")
-            return json.loads(res.choices[0].message.content)
-        except Exception as e:
-            error_msg = str(e)
-            if "model_not_found" in error_msg or "404" in error_msg:
-                print(f"[LLM WARNING] Model {model_name} unavailable, trying next...")
-                continue
-            else:
-                print(f"[LLM ERROR] Exception during evaluation: {e}")
-                return None
-
-    print("[LLM ERROR] None of the Groq model endpoints were reachable.")
-    return None
-    if not groq_client:
-        print("[LLM ERROR] GROQ_API_KEY missing from environment variables.")
-        return None
-
-    prompt = f"""
-    CANDIDATE PROFILE:
-    {user_profile}
-
-    JOB TITLE: {job['title']}
-    COMPANY: {job['company']}
-
-    Evaluate if this job is a fit.
-    Respond ONLY with JSON:
-    {{
-        "fit_score": 85,
-        "verdict": "Apply",
-        "customization_tip": "Highlight backend and API skills."
-    }}
-    """
-
-    try:
-        res = groq_client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            response_format={"type": "json_object"},
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.2
-        )
-        data = json.loads(res.choices[0].message.content)
-        print(f"[LLM EVAL] Job: {job['title']} | Score: {data.get('fit_score')}%")
-        return data
-    except Exception as e:
-        print(f"[LLM ERROR] {e}")
-        return None
 
 def send_telegram_notification(text):
+    """Sends matched job alerts directly to your Telegram chat."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("[TELEGRAM ERROR] TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID missing in secrets.")
-        print(f"[CONSOLE OUTPUT]:\n{text}")
+        print("[TELEGRAM NOTICE] Secrets missing. Outputting message locally:")
+        print(text)
         return
 
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "Markdown"}
     try:
-        r = requests.post(url, json=payload, timeout=10)
-        res_data = r.json()
-        if not res_data.get("ok"):
-            print(f"[TELEGRAM API ERROR] Response: {res_data}")
-        else:
-            print("[TELEGRAM] Message sent successfully!")
+        res = requests.post(url, json=payload, timeout=10)
+        print(f"[TELEGRAM] Response Status: {res.status_code}")
     except Exception as e:
         print(f"[TELEGRAM ERROR] {e}")
 
 def main():
-    print("=== STARTING JOB EVALUATION PIPELINE ===")
-    
-    # Send quick heart-beat ping to confirm Telegram works
-    send_telegram_notification("🤖 *Job Scraper Executed*: Checking for new job postings now...")
+    print("=== STARTING FRESHER REMOTE JOB PIPELINE ===")
+    send_telegram_notification("🤖 *Job Scraper Executed:* Scanning for Remote Fresher / Internship roles...")
 
-    jobs = scrape_linkedin_jobs(keyword="Backend Engineer", limit=5)
-    print(f"[PIPELINE] Scraped {len(jobs)} valid job links.")
+    jobs = scrape_fresher_remote_jobs(keyword="Software Engineer", limit=5)
+    print(f"[PIPELINE] Scraped {len(jobs)} valid job listings.")
 
     matches_found = 0
     for job in jobs:
@@ -235,19 +185,29 @@ def main():
         if not eval_result:
             continue
 
+        is_fresher = eval_result.get("is_fresher_friendly", True)
         score = eval_result.get("fit_score", 0)
-        # Lowered threshold to 50% for testing visibility
-        if score >= 50:
+        stipend = eval_result.get("expected_stipend_or_salary", "Not specified")
+
+        print(f"Job: {job['title']} | Fresher Friendly: {is_fresher} | Score: {score}% | Stipend: {stipend}")
+
+        # Send alert if job is suitable for freshers and scores >= 70%
+        if is_fresher and score >= 70:
             matches_found += 1
             msg = (
-                f"🎯 *Job Match Found ({score}%)*\n"
+                f"🎯 *New Remote Fresher Opportunity ({score}% Match)*\n"
                 f"*Role:* {job['title']}\n"
                 f"*Company:* {job['company']}\n"
-                f"*Tip:* {eval_result.get('customization_tip')}\n"
+                f"*Expected Stipend/Salary:* {stipend}\n"
+                f"*Work Mode:* 🏠 Remote\n"
+                f"*Tip:* {eval_result.get('customization_tip')}\n\n"
                 f"[Apply Here]({job['url']})"
             )
             send_telegram_notification(msg)
             time.sleep(1)
+
+    if matches_found == 0:
+        send_telegram_notification("ℹ️ Scan completed. No remote fresher postings found above 70% match in this run.")
 
     print(f"=== PIPELINE FINISHED. Sent {matches_found} job alerts ===")
 
