@@ -17,18 +17,18 @@ groq_client = openai.OpenAI(
 
 USER_PROFILE = """
 Fourth-year B.Tech student in Biotechnology at IIT Delhi looking for remote Software Engineering (SDE),
-Data Science, Machine Learning, or Quantitative Development roles and internships.
+Data Science, Machine Learning, or Quantitative Development internships or fresher entry-level positions.
 Technical Skills: Python, C++, SQL, Java, Go, PyTorch, TensorFlow, Scikit-Learn, Pandas, NumPy, REST APIs, System Design.
 Experience: Software Development Intern at Flipkart (data compression optimization, AI developer tooling),
 NSS Secretary, top 25 at FITT Tech Future Hackathon 2024.
 """
 
 SEARCH_KEYWORDS = [
-    "Software Engineer",
-    "Data Scientist",
-    "Quantitative Developer",
-    "Machine Learning Engineer",
-    "Data Engineer"
+    "Software Engineer Intern",
+    "Entry Level Software Engineer",
+    "Data Science Intern",
+    "Graduate Software Engineer",
+    "Machine Learning Intern"
 ]
 
 def get_active_groq_model():
@@ -67,11 +67,11 @@ def fetch_job_description(job_url, headers):
         print(f"[SCRAPER WARNING] Could not fetch description for {job_url}: {e}")
     return "Description unretrievable."
 
-def scrape_linkedin_remote_jobs(keyword, limit_per_keyword=3):
+def scrape_fresher_intern_jobs(keyword, limit_per_keyword=3):
     """
-    Fetches guest LinkedIn jobs filtered for Remote + Internships / Entry / Associate level.
+    Fetches guest LinkedIn jobs filtered strictly for Remote + Internships & Entry Level Freshers ONLY.
     f_WT=2 -> Remote
-    f_E=1,2,3 -> Internship (1), Entry Level (2), Associate (3)
+    f_E=1,2 -> Internship (1), Entry Level / Fresher (2)
     """
     base_url = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
     jobs = []
@@ -82,8 +82,8 @@ def scrape_linkedin_remote_jobs(keyword, limit_per_keyword=3):
     params = {
         "keywords": keyword,
         "location": "Remote",
-        "f_WT": "2",        # Remote only
-        "f_E": "1,2,3",     # Internship, Entry Level, Associate
+        "f_WT": "2",     # Remote only
+        "f_E": "1,2",    # Internship (1) and Entry Level (2) ONLY
         "start": 0
     }
 
@@ -119,7 +119,7 @@ def scrape_linkedin_remote_jobs(keyword, limit_per_keyword=3):
     return jobs
 
 def evaluate_job(user_profile, job):
-    """Evaluates role fit, expected stipend/salary, job type, and experience requirements."""
+    """Evaluates role fit, stipend/salary, and strictly enforces 0-1 year experience limits."""
     if not groq_client:
         print("[LLM ERROR] GROQ_API_KEY missing!")
         return None
@@ -137,19 +137,18 @@ def evaluate_job(user_profile, job):
 
     Respond ONLY with a valid JSON object matching this schema:
     {{
-        "job_type": "Internship / Full-Time / Contract",
-        "suitable_for_fresher_or_grad": true/false,
-        "is_high_paying": true/false,
-        "expected_stipend_or_salary": "e.g., $40/hr, ₹60,000/mo, $120k/yr, or Not specified",
+        "is_strictly_fresher_or_intern": true/false,
+        "job_type": "Internship / Fresher Entry-Level",
+        "expected_stipend_or_salary": "e.g., $35/hr, ₹40,000/mo, or Not specified",
         "fit_score": 85,
         "verdict": "Apply / Consider / Skip",
-        "customization_tip": "Highlight experience with PyTorch, C++, and microservices."
+        "customization_tip": "Highlight PyTorch, system design, and Python background."
     }}
 
-    CRITICAL EVALUATION RULES:
-    1. Set "suitable_for_fresher_or_grad" to false ONLY if the position explicitly requires 3+ years of post-graduation industry experience.
-    2. Extract any stipend, hourly rate, or annual compensation numbers from the text. If none exist, output "Not specified in description".
-    3. Set "is_high_paying" to true if the position offers competitive pay (e.g., >$30/hr, >₹50k/mo stipend, or >$80k/yr full-time).
+    STRICT FILTERING RULES:
+    1. Set "is_strictly_fresher_or_intern" to false if the job description requires 2+ years of prior full-time post-graduation experience.
+    2. Set "is_strictly_fresher_or_intern" to true if it is an Internship, New Grad, Fresh Graduate, or 0-1 year experience role.
+    3. Extract any salary or stipend compensation numbers. If unlisted, output "Not specified in description".
     """
 
     target_model = get_active_groq_model()
@@ -183,22 +182,21 @@ def send_telegram_notification(text):
         print(f"[TELEGRAM ERROR] {e}")
 
 def main():
-    print("=== STARTING SDE & DATA SCIENCE REMOTE JOB PIPELINE ===")
-    send_telegram_notification("🤖 *Job Scraper Triggered:* Scanning SDE, Data Science, & Quant Remote Roles...")
+    print("=== STARTING STRICT FRESHER & INTERN JOB PIPELINE ===")
+    send_telegram_notification("🤖 *Job Scraper Triggered:* Scanning Remote Internships & Fresher Roles...")
 
     all_jobs = []
     seen_urls = set()
 
-    # Iterate through each career domain
     for kw in SEARCH_KEYWORDS:
-        scraped = scrape_linkedin_remote_jobs(keyword=kw, limit_per_keyword=3)
+        scraped = scrape_fresher_intern_jobs(keyword=kw, limit_per_keyword=3)
         for j in scraped:
             if j["url"] not in seen_urls:
                 seen_urls.add(j["url"])
                 all_jobs.append(j)
-        time.sleep(1) # Gentle rate-limiting
+        time.sleep(1)
 
-    print(f"[PIPELINE] Scraped {len(all_jobs)} unique listings across SDE & Data Science domains.")
+    print(f"[PIPELINE] Scraped {len(all_jobs)} unique listings across Fresher & Intern domains.")
 
     matches_found = 0
     for job in all_jobs:
@@ -206,26 +204,23 @@ def main():
         if not eval_result:
             continue
 
-        is_suitable = eval_result.get("suitable_for_fresher_or_grad", True)
+        is_fresher = eval_result.get("is_strictly_fresher_or_intern", False)
         score = eval_result.get("fit_score", 0)
         stipend = eval_result.get("expected_stipend_or_salary", "Not specified")
-        job_type = eval_result.get("job_type", "Remote Role")
-        is_high_pay = eval_result.get("is_high_paying", False)
+        job_type = eval_result.get("job_type", "Internship / Entry-Level")
 
-        print(f"[{job['search_category']}] {job['title']} | Score: {score}% | Type: {job_type} | Pay: {stipend}")
+        print(f"[{job['search_category']}] {job['title']} | Fresher OK: {is_fresher} | Score: {score}% | Pay: {stipend}")
 
-        # Dispatch alert if job matches profile (>70%) and fits experience requirements
-        if is_suitable and score >= 70:
+        # Send Telegram alert only if strictly fresher/intern and score >= 70%
+        if is_fresher and score >= 70:
             matches_found += 1
-            high_pay_badge = "🔥 *[High Paying]*\n" if is_high_pay else ""
             msg = (
-                f"🎯 *New Remote Match ({score}% Match)*\n"
-                f"{high_pay_badge}"
+                f"🎯 *New Fresher/Internship Opportunity ({score}% Match)*\n\n"
                 f"*Role:* {job['title']}\n"
                 f"*Company:* {job['company']}\n"
                 f"*Category:* {job['search_category']}\n"
                 f"*Type:* {job_type}\n"
-                f"*Expected Pay/Stipend:* {stipend}\n"
+                f"*Expected Stipend/Salary:* {stipend}\n"
                 f"*Work Mode:* 🏠 Remote\n"
                 f"*Tip:* {eval_result.get('customization_tip')}\n\n"
                 f"[Apply Here]({job['url']})"
@@ -234,7 +229,7 @@ def main():
             time.sleep(1)
 
     if matches_found == 0:
-        send_telegram_notification("ℹ️ Scan complete. No suitable high-match SDE/DS listings found in this cycle.")
+        send_telegram_notification("ℹ️ Scan complete. No suitable fresher/internship listings found in this cycle.")
 
     print(f"=== PIPELINE FINISHED. Sent {matches_found} alerts ===")
 
