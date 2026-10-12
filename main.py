@@ -56,6 +56,56 @@ def scrape_linkedin_jobs(keyword, location="Remote", limit=5):
     return jobs
 
 def evaluate_job(user_profile, job):
+    """Evaluates role fit using Groq's free tier models with automatic fallback."""
+    if not groq_client:
+        print("[LLM ERROR] GROQ_API_KEY missing! Set GROQ_API_KEY in GitHub Secrets.")
+        return None
+
+    prompt = f"""
+    CANDIDATE PROFILE:
+    {user_profile}
+
+    JOB TITLE: {job['title']}
+    COMPANY: {job['company']}
+
+    Evaluate role fit. Respond ONLY with valid JSON:
+    {{
+        "fit_score": 85,
+        "verdict": "Apply",
+        "customization_tip": "Highlight backend microservice and Python experience."
+    }}
+    """
+
+    # List of candidate model IDs on Groq (runs in order of preference)
+    candidate_models = [
+        "llama-3.1-8b-instant",
+        "llama3-8b-8192",
+        "llama-3.3-70b-versatile",
+        "mixtral-8x7b-32768"
+    ]
+
+    for model_name in candidate_models:
+        try:
+            res = groq_client.chat.completions.create(
+                model=model_name,
+                response_format={"type": "json_object"},
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.2
+            )
+            # Log which model successfully handled the request
+            print(f"[LLM SUCCESS] Evaluated using {model_name}")
+            return json.loads(res.choices[0].message.content)
+        except Exception as e:
+            error_msg = str(e)
+            if "model_not_found" in error_msg or "404" in error_msg:
+                print(f"[LLM WARNING] Model {model_name} unavailable, trying next...")
+                continue
+            else:
+                print(f"[LLM ERROR] Exception during evaluation: {e}")
+                return None
+
+    print("[LLM ERROR] None of the Groq model endpoints were reachable.")
+    return None
     if not groq_client:
         print("[LLM ERROR] GROQ_API_KEY missing from environment variables.")
         return None
