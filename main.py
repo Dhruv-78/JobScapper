@@ -55,7 +55,69 @@ def scrape_linkedin_jobs(keyword, location="Remote", limit=5):
 
     return jobs
 
+def get_active_groq_model():
+    """Fetches currently available text models dynamically from Groq."""
+    try:
+        models = groq_client.models.list()
+        active_ids = [m.id for m in models.data]
+        
+        # Preference order of active models
+        preferred = [
+            "llama-3.3-70b-versatile",
+            "openai/gpt-oss-20b",
+            "llama-3.1-8b-instant"
+        ]
+        
+        for pref in preferred:
+            if pref in active_ids:
+                return pref
+        
+        # Fallback to the first available non-whisper/non-guard model
+        text_models = [m_id for m_id in active_ids if "whisper" not in m_id and "guard" not in m_id]
+        if text_models:
+            return text_models[0]
+            
+    except Exception as e:
+        print(f"[LLM WARNING] Could not fetch dynamic models: {e}")
+    
+    # Static safe fallback
+    return "llama-3.3-70b-versatile"
+
 def evaluate_job(user_profile, job):
+    """Evaluates role fit using an active Groq model."""
+    if not groq_client:
+        print("[LLM ERROR] GROQ_API_KEY missing! Set GROQ_API_KEY in GitHub Secrets.")
+        return None
+
+    prompt = f"""
+    CANDIDATE PROFILE:
+    {user_profile}
+
+    JOB TITLE: {job['title']}
+    COMPANY: {job['company']}
+
+    Evaluate role fit. Respond ONLY with valid JSON matching this schema:
+    {{
+        "fit_score": 85,
+        "verdict": "Apply",
+        "customization_tip": "Highlight microservices and Python background."
+    }}
+    """
+
+    target_model = get_active_groq_model()
+
+    try:
+        res = groq_client.chat.completions.create(
+            model=target_model,
+            response_format={"type": "json_object"},
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2
+        )
+        print(f"[LLM SUCCESS] Evaluated using model: {target_model}")
+        return json.loads(res.choices[0].message.content)
+    except Exception as e:
+        print(f"[LLM ERROR] Evaluation failed on {target_model}: {e}")
+        return None
     """Evaluates role fit using Groq's free tier models with automatic fallback."""
     if not groq_client:
         print("[LLM ERROR] GROQ_API_KEY missing! Set GROQ_API_KEY in GitHub Secrets.")
