@@ -6,6 +6,7 @@ import requests
 from bs4 import BeautifulSoup
 import openai
 
+# Environment Secrets
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
@@ -31,7 +32,7 @@ JOB_KEYWORDS = [
 ]
 
 def get_active_groq_model():
-    """Dynamically retrieves an active text model from Groq API."""
+    """Dynamically fetches active Groq models."""
     try:
         models = groq_client.models.list()
         active_ids = [m.id for m in models.data]
@@ -46,18 +47,43 @@ def get_active_groq_model():
         print(f"[LLM WARNING] Dynamic model lookup failed: {e}")
     return "llama-3.3-70b-versatile"
 
+def is_strictly_remote(title, location, description):
+    """
+    Hard-coded structural filter to ensure 100% remote compliance.
+    Rejects On-site, Hybrid, or relocation-mandatory roles before LLM processing.
+    """
+    text_combined = f"{title} {location} {description}".lower()
+    
+    # Reject explicit hybrid / on-site markers
+    if any(negative in text_combined for negative in ["hybrid", "on-site", "onsite", "in-office", "relocate to"]):
+        return False
+        
+    # Must contain remote keywords
+    remote_keywords = ["remote", "work from home", "wfh", "anywhere in india", "work from anywhere", "telecommute"]
+    return any(kw in text_combined for kw in remote_keywords)
+
 def fetch_job_details(job_url, headers):
-    description = "Description unretrievable."
+    """Extracts job location, workplace type, and description."""
+    description = ""
+    location = ""
     recruiter_info = {"name": None, "profile_url": None}
 
     try:
         res = requests.get(job_url, headers=headers, timeout=8)
         if res.status_code == 200:
             soup = BeautifulSoup(res.text, "html.parser")
+            
+            # Extract description
             desc_div = soup.find("div", class_="show-more-less-html__markup")
             if desc_div:
                 description = desc_div.text.strip()[:2500]
 
+            # Extract location string directly from LinkedIn header
+            loc_span = soup.find("span", class_="topcard__flavor--bullet") or soup.find("span", class_="job-search-card__location")
+            if loc_span:
+                location = loc_span.text.strip()
+
+            # Extract recruiter / manager profile if present
             recruiter_card = soup.find("div", class_="message-the-recruiter") or soup.find("a", class_="base-card__full-link")
             if recruiter_card:
                 name_tag = recruiter_card.find("h3") or recruiter_card.find("span")
@@ -71,13 +97,22 @@ def fetch_job_details(job_url, headers):
     except Exception as e:
         print(f"[SCRAPER WARNING] Details fetch error: {e}")
 
-    return description, recruiter_info
+    return description, location, recruiter_info
 
-def scrape_linkedin_job_cards(keyword, limit_per_keyword=2):
+def scrape_linkedin_job_cards(keyword, limit_per_keyword=3):
+    """Scrapes LinkedIn official job cards with forced Remote URL parameters."""
     base_url = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
     jobs = []
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-    params = {"keywords": keyword, "location": "Remote", "f_WT": "2", "f_E": "1,2", "start": 0}
+    
+    # f_WT=2 forces REMOTE workplace type on LinkedIn
+    params = {
+        "keywords": keyword,
+        "location": "Worldwide",
+        "f_WT": "2",
+        "f_E": "1,2",
+        "start": 0
+    }
 
     try:
         response = requests.get(base_url, headers=headers, params=params, timeout=10)
@@ -91,83 +126,108 @@ def scrape_linkedin_job_cards(keyword, limit_per_keyword=2):
 
                 if title_tag and link_tag:
                     job_url = link_tag["href"]
-                    description, recruiter = fetch_job_details(job_url, headers)
-                    jobs.append({
-                        "source_type": "Job Card",
-                        "title": title_tag.text.strip(),
-                        "company": company_tag.text.strip() if company_tag else "N/A",
-                        "url": job_url,
-                        "content": description,
-                        "recruiter": recruiter
-                    })
+                    description, location, recruiter = fetch_job_details(job_url, headers)
+                    
+                    title = title_tag.text.strip()
+                    company = company_tag.text.strip() if company_tag else "N/A"
+
+                    # Verify strict remote compliance
+                    if is_strictly_remote(title, location, description):
+                        jobs.append({
+                            "source_type": "Job Card",
+                            "title": title,
+                            "company": company,
+                            "location": location or "Remote",
+                            "url": job_url,
+                            "content": description,
+                            "recruiter": recruiter
+                        })
     except Exception as e:
-        print(f"[JOB CARD SCRAPER ERROR] {e}")
+        print(f"[JOB CARD ERROR] {e}")
     return jobs
 
 def scrape_linkedin_hiring_posts():
-    """Scrapes hiring posts from public feed aggregators and LinkedIn search endpoints."""
+    """
+    Scrapes LinkedIn posts directly by querying public search feeds for direct recruiter hiring posts.
+    """
     posts = []
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     
-    # Target guest search API for content posts
-    search_terms = ["hiring intern remote python", "hiring software engineer fresher remote", "DM resume data science intern"]
-    
-    for term in search_terms:
+    search_queries = [
+        "hiring intern remote python software",
+        "hiring data science intern remote",
+        "DM resume remote software engineer fresher"
+    ]
+
+    for query in search_queries:
         try:
-            url = f"https://www.google.com/search?q=site:linkedin.com/posts+%22{requests.utils.quote(term)}%22"
-            res = requests.get(url, headers=headers, timeout=8)
+            # Query public aggregator endpoints for LinkedIn post URLs
+            target_url = f"https://www.google.com/search?q=site:linkedin.com/posts+%22{requests.utils.quote(query)}%22"
+            res = requests.get(target_url, headers=headers, timeout=8)
             if res.status_code == 200:
                 soup = BeautifulSoup(res.text, "html.parser")
-                links = soup.find_all("a", href=True)
-                for l in links:
-                    href = l["href"]
-                    if "/posts/" in href or "/feed/update/" in href:
+                for a in soup.find_all("a", href=True):
+                    href = a["href"]
+                    if "linkedin.com/posts/" in href or "linkedin.com/feed/update/" in href:
                         clean_url = href.split("&")[0].replace("/url?q=", "")
-                        if "linkedin.com" in clean_url:
+                        
+                        # Extract post text snippet
+                        snippet_div = a.find_parent("div")
+                        snippet_text = snippet_div.text if snippet_div else "LinkedIn Hiring Post"
+
+                        if is_strictly_remote("Hiring Post", "Remote", snippet_text):
                             posts.append({
                                 "source_type": "LinkedIn Post",
-                                "title": f"Hiring Post ({term})",
-                                "company": "Poster / Hiring Manager",
+                                "title": "Direct Hiring Post",
+                                "company": "Hiring Manager / Recruiter",
+                                "location": "Remote",
                                 "url": clean_url,
-                                "content": "Direct hiring post found on LinkedIn.",
+                                "content": snippet_text[:1500],
                                 "recruiter": {"name": "Post Author", "profile_url": clean_url}
                             })
         except Exception as e:
-            print(f"[POST SCRAPER ERROR] {e}")
+            print(f"[POST SCRAPER WARNING] {e}")
 
     return posts
 
-def evaluate_job(user_profile, item):
-    """Evaluates posting and conditionally determines if a registration link or recruiter DM is needed."""
+def evaluate_opportunity(user_profile, item):
+    """Evaluates posting and conditionally determines registration links vs recruiter outreach."""
     if not groq_client:
         return None
 
-    # Detect external URLs/registration links inside the content
+    # Detect external URLs / application links inside text
     urls_in_content = re.findall(r'https?://[^\s<>"]+|www\.[^\s<>"]+', item['content'])
-    registration_link = urls_in_content[0] if urls_in_content else None
+    registration_link = None
+    for u in urls_in_content:
+        if "linkedin.com" not in u and "google.com" not in u:
+            registration_link = u
+            break
 
     prompt = f"""
     CANDIDATE PROFILE:
     {user_profile}
 
     SOURCE TYPE: {item['source_type']}
-    TITLE/ROLE: {item['title']}
-    COMPANY/POSTER: {item['company']}
+    TITLE: {item['title']}
+    COMPANY: {item['company']}
+    LOCATION: {item['location']}
     CONTENT: {item['content']}
-    DETECTED LINK: {registration_link}
 
     TASK:
-    Analyze if this posting has a direct registration/application link or if candidate must contact the poster directly.
+    1. Verify if role is suitable for a fresher/grad/intern (0-1 yrs exp).
+    2. Confirm if position is 100% REMOTE.
+    3. Determine if there is a direct application/registration form link.
 
-    Respond ONLY with a valid JSON object:
+    Respond ONLY with valid JSON:
     {{
         "is_fresher_or_intern": true/false,
+        "is_remote_confirmed": true/false,
         "has_direct_apply_link": true/false,
         "direct_apply_url": "{registration_link if registration_link else 'None'}",
         "expected_stipend_or_salary": "e.g., $35/hr, ₹40,000/mo, or Not specified",
         "fit_score": 85,
-        "connection_note": "Write a <280 character connection request note ONLY IF has_direct_apply_link is false.",
-        "messaging_tips": "Key points to mention if reaching out directly."
+        "connection_note": "Draft a polite <280 char connection note ONLY IF has_direct_apply_link is false.",
+        "messaging_tips": "2 key technical skills (Python, PyTorch, C++) to mention when reaching out."
     }}
     """
 
@@ -196,70 +256,72 @@ def send_telegram_notification(text):
         print(f"[TELEGRAM ERROR] {e}")
 
 def main():
-    print("=== STARTING DUAL-CHANNEL SCRAPER & EVALUATOR ===")
+    print("=== STARTING DUAL-CHANNEL REMOTE JOB & POST PIPELINE ===")
     
-    # 1. ALWAYS send a Daily Status Update so you know it ran
-    send_telegram_notification("📅 *Daily Job Scraper Update:* Running scan across LinkedIn Job Cards & Direct Hiring Posts...")
+    # 1. Daily Notification Ping
+    send_telegram_notification("📅 *Daily Job Scraper Executed:* Scanning Remote Job Cards & Direct Hiring Posts...")
 
     all_items = []
     seen_urls = set()
 
-    # Gather Job Cards
+    # Scrape Job Cards
     for kw in JOB_KEYWORDS:
-        cards = scrape_linkedin_job_cards(keyword=kw, limit_per_keyword=2)
+        cards = scrape_linkedin_job_cards(keyword=kw, limit_per_keyword=3)
         for c in cards:
             if c["url"] not in seen_urls:
                 seen_urls.add(c["url"])
                 all_items.append(c)
 
-    # Gather LinkedIn Posts
+    # Scrape Direct Posts
     posts = scrape_linkedin_hiring_posts()
     for p in posts:
         if p["url"] not in seen_urls:
             seen_urls.add(p["url"])
             all_items.append(p)
 
-    print(f"[PIPELINE] Collected {len(all_items)} total opportunities.")
+    print(f"[PIPELINE] Collected {len(all_items)} total remote opportunities.")
 
     matches_found = 0
     for item in all_items:
-        eval_res = evaluate_job(USER_PROFILE, item)
+        eval_res = evaluate_opportunity(USER_PROFILE, item)
         if not eval_res:
             continue
 
         is_fresher = eval_res.get("is_fresher_or_intern", False)
+        is_remote = eval_res.get("is_remote_confirmed", False)
         score = eval_res.get("fit_score", 0)
         has_apply_link = eval_res.get("has_direct_apply_link", False)
         apply_url = eval_res.get("direct_apply_url", "None")
         stipend = eval_res.get("expected_stipend_or_salary", "Not specified")
 
-        if is_fresher and score >= 70:
+        # Send alert ONLY if verified as Remote + Fresher/Intern + Fit Score >= 70%
+        if is_fresher and is_remote and score >= 70:
             matches_found += 1
             
-            # Action logic: Show apply link IF present; show recruiter profile ONLY IF no apply link
+            # Logic: Display Apply Link IF present; Display Recruiter Contact ONLY IF no registration link exists
             if has_apply_link and apply_url != "None":
-                action_block = f"📝 *Apply Directly Here:* [Registration Link]({apply_url})"
+                action_block = f"📝 *Apply Directly Here:* [Registration Form Link]({apply_url})"
             else:
-                recruiter_url = item["recruiter"]["profile_url"] or f"https://www.linkedin.com/search/results/people/?keywords=Recruiter%20{item['company']}"
+                recruiter_url = item["recruiter"]["profile_url"] or f"https://www.linkedin.com/search/results/people/?keywords=Technical%20Recruiter%20{item['company']}"
                 action_block = (
-                    f"👤 *No direct registration link found. Contact Recruiter:* [LinkedIn Profile]({recruiter_url})\n\n"
+                    f"👤 *No Registration Link Found. Reach Out Directly:* [LinkedIn Profile]({recruiter_url})\n\n"
                     f"💬 *Outreach Note (<280 chars):*\n`{eval_res.get('connection_note')}`\n\n"
-                    f"📌 *Tips:* {eval_res.get('messaging_tips')}"
+                    f"📌 *Messaging Tips:* {eval_res.get('messaging_tips')}"
                 )
 
             msg = (
                 f"🎯 *New Match ({score}% Fit - {item['source_type']})*\n\n"
                 f"*Role:* {item['title']}\n"
                 f"*Company/Poster:* {item['company']}\n"
-                f"*Stipend/Pay:* {stipend}\n"
-                f"*Work Mode:* 🏠 Remote\n\n"
-                f"🔗 [View Original Post]({item['url']})\n"
+                f"*Location:* 🏠 Remote ({item['location']})\n"
+                f"*Expected Pay/Stipend:* {stipend}\n\n"
+                f"🔗 [View LinkedIn Post/Listing]({item['url']})\n"
                 f"{action_block}"
             )
             send_telegram_notification(msg)
             time.sleep(1)
 
-    send_telegram_notification(f"✅ *Daily Scan Finished:* Processed {len(all_items)} postings, sent {matches_found} qualified alerts.")
+    send_telegram_notification(f"✅ *Daily Scan Completed:* Evaluated {len(all_items)} remote postings, sent {matches_found} qualified alerts.")
 
 if __name__ == "__main__":
     main()
