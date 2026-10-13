@@ -1,9 +1,9 @@
-name: Hourly LinkedIn Job Scraper & AI Evaluator
+name: Daily LinkedIn Job Scraper & AI Evaluator
 
 on:
   schedule:
-    # Runs at minute 0 of every hour
-    - cron: '0 * * * *'
+    # Runs once daily at 03:30 AM UTC (9:00 AM IST)
+    - cron: '30 3 * * *'
   workflow_dispatch: # Allows manual trigger from GitHub UI
 
 jobs:
@@ -25,7 +25,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Execute Scraper & Groq AI Pipeline
+      - name: Execute Scraper & AI Pipeline
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
